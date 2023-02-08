@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from composer.metrics.nlp import LanguageCrossEntropy, Perplexity
 from composer.models.base import ComposerModel
 from omegaconf import DictConfig
+import megablocks
 
 
 class TorchCausalAttention(nn.Module):
@@ -217,6 +218,28 @@ class GPTMLP(nn.Module):
         return self.mlp_down(self.mlp_act(self.mlp_up(x)))
 
 
+class dMoE(nn.Module):
+
+    def __init__(self, cfg: DictConfig, device: Optional[str] = None):
+        super().__init__()
+        init_method = partial(torch.nn.init.normal_, mean=0.0, std=cfg.init_std)
+        args = megablocks.layers.arguments.Arguments(
+            hidden_size=cfg.d_model,
+            ffn_hidden_size=cfg.d_model * cfg.mlp_ratio,
+            num_layers=cfg.n_layers,
+            init_method=init_method,
+            output_layer_init_method=init_method,
+            device=device or torch.cuda.current_device(),
+            # NOTE: Lean on autocast to handle reduced precision.
+            fp16=False,
+            moe_lbl_in_fp32=True,
+        )
+        self.moe = megablocks.layers.dmoe.dMoE(args)
+
+    def forward(self, x):
+        return self.moe(x)[0]
+
+
 class GPTBlock(nn.Module):
 
     def __init__(self,
@@ -226,10 +249,12 @@ class GPTBlock(nn.Module):
         super().__init__()
         if cfg.get('alibi', False):
             assert cfg.attn_impl == 'triton' or cfg.attn_impl == 'torch', 'Only triton kernel or torch supports alibi'
+
+        mlp_cls = dMoE if cfg.get("moe", None) else GPTMLP
         self.ln_1 = nn.LayerNorm(cfg.d_model, device=device)
         self.causal_attn = causal_attn_cls(cfg, device)
         self.ln_2 = nn.LayerNorm(cfg.d_model, device=device)
-        self.mlp = GPTMLP(cfg, device=device)
+        self.mlp = mlp_cls(cfg, device=device)
         self.resid_attn_dropout = nn.Dropout(cfg.resid_pdrop)
         self.resid_mlp_dropout = nn.Dropout(cfg.resid_pdrop)
 
