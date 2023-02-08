@@ -218,7 +218,7 @@ class GPTMLP(nn.Module):
         return self.mlp_down(self.mlp_act(self.mlp_up(x)))
 
 
-def _megablocks_arguments(cfg: DictConfig):
+def _megablocks_arguments(cfg: DictConfig, device: Optional[str] = None):
     init_method = partial(torch.nn.init.normal_, mean=0.0, std=cfg.init_std)
     args = megablocks.layers.arguments.Arguments(
         # Model arguments.
@@ -248,7 +248,8 @@ class dMoE(nn.Module):
 
     def __init__(self, cfg: DictConfig, device: Optional[str] = None):
         super().__init__()
-        self.moe = megablocks.layers.dmoe.dMoE(_megablocks_arguments(cfg))
+        self.moe = megablocks.layers.dmoe.dMoE(
+            _megablocks_arguments(cfg, device))
 
     def forward(self, x):
         return self.moe(x)[0]
@@ -562,12 +563,13 @@ class ComposerMosaicGPT(ComposerModel):
                                ignore_index=-100)
 
 
-        if cfg.get('moe', None):
+        if self.model.cfg.get('moe', None):
             load_balancing_loss = (
                 megablocks.layers.moe.batched_load_balancing_loss(
                     _megablocks_arguments(self.model.cfg))
             )
             loss += self.model.cfg.moe.loss_weight * load_balancing_loss
+            megablocks.layers.moe.clear_load_balancing_loss()
         return loss
 
     def get_metrics(self, is_train=False):
