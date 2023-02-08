@@ -218,23 +218,37 @@ class GPTMLP(nn.Module):
         return self.mlp_down(self.mlp_act(self.mlp_up(x)))
 
 
+def _megablocks_arguments(cfg: DictConfig):
+    init_method = partial(torch.nn.init.normal_, mean=0.0, std=cfg.init_std)
+    args = megablocks.layers.arguments.Arguments(
+        # Model arguments.
+        hidden_size=cfg.d_model,
+        ffn_hidden_size=cfg.d_model * cfg.mlp_ratio,
+        num_layers=cfg.n_layers,
+        # MoE arguments.
+        moe_num_experts=cfg.moe.num_experts,
+        moe_top_k=cfg.moe.top_k,
+        moe_capacity_factor=cfg.moe.get("capacity_factor", 1),
+        moe_loss_weight=cfg.moe.loss_weight,
+        moe_jitter_eps=cfg.moe.get("jitter_eps", None),
+        # TODO(tgale): Add parallelism arguments.
+        #
+        # Initialization arguments.
+        init_method=init_method,
+        output_layer_init_method=init_method,
+        device=device or torch.cuda.current_device(),
+        # NOTE: Lean on autocast to handle reduced precision.
+        fp16=False,
+        moe_lbl_in_fp32=True,
+    )
+    return args
+
+
 class dMoE(nn.Module):
 
     def __init__(self, cfg: DictConfig, device: Optional[str] = None):
         super().__init__()
-        init_method = partial(torch.nn.init.normal_, mean=0.0, std=cfg.init_std)
-        args = megablocks.layers.arguments.Arguments(
-            hidden_size=cfg.d_model,
-            ffn_hidden_size=cfg.d_model * cfg.mlp_ratio,
-            num_layers=cfg.n_layers,
-            init_method=init_method,
-            output_layer_init_method=init_method,
-            device=device or torch.cuda.current_device(),
-            # NOTE: Lean on autocast to handle reduced precision.
-            fp16=False,
-            moe_lbl_in_fp32=True,
-        )
-        self.moe = megablocks.layers.dmoe.dMoE(args)
+        self.moe = megablocks.layers.dmoe.dMoE(_megablocks_arguments(cfg))
 
     def forward(self, x):
         return self.moe(x)[0]
@@ -250,7 +264,7 @@ class GPTBlock(nn.Module):
         if cfg.get('alibi', False):
             assert cfg.attn_impl == 'triton' or cfg.attn_impl == 'torch', 'Only triton kernel or torch supports alibi'
 
-        mlp_cls = dMoE if cfg.get("moe", None) else GPTMLP
+        mlp_cls = dMoE if cfg.get('moe', None) else GPTMLP
         self.ln_1 = nn.LayerNorm(cfg.d_model, device=device)
         self.causal_attn = causal_attn_cls(cfg, device)
         self.ln_2 = nn.LayerNorm(cfg.d_model, device=device)
@@ -277,8 +291,8 @@ class MosaicGPT(nn.Module):
 
     def __init__(self, cfg: DictConfig):
         super().__init__()
-        assert cfg.name == 'mosaic_gpt', f'Tried to build MosaicGPT model with cfg.name={cfg.name}'
         self.cfg = cfg
+        assert cfg.name == 'mosaic_gpt', f'Tried to build MosaicGPT model with cfg.name={cfg.name}'
         if cfg.attn_impl == 'torch':
             self.causal_attn_cls = TorchCausalAttention
         elif cfg.attn_impl == 'flash':
@@ -543,9 +557,18 @@ class ComposerMosaicGPT(ComposerModel):
 
     def loss(self, outputs, batch):
         targets = self.get_targets(batch)
-        return F.cross_entropy(outputs.view(-1, outputs.size(-1)),
+        loss = F.cross_entropy(outputs.view(-1, outputs.size(-1)),
                                targets.view(-1),
                                ignore_index=-100)
+
+
+        if cfg.get('moe', None):
+            load_balancing_loss = (
+                megablocks.layers.moe.batched_load_balancing_loss(
+                    _megablocks_arguments(self.model.cfg))
+            )
+            loss += self.model.cfg.moe.loss_weight * load_balancing_loss
+        return loss
 
     def get_metrics(self, is_train=False):
         return self.train_metrics if is_train else self.eval_metrics
