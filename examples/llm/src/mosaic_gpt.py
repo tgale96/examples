@@ -18,6 +18,7 @@ from composer.metrics.nlp import LanguageCrossEntropy, Perplexity
 from composer.models.base import ComposerModel
 from omegaconf import DictConfig
 import megablocks
+from megablocks.layers import mpu
 
 
 class TorchCausalAttention(nn.Module):
@@ -219,7 +220,7 @@ class GPTMLP(nn.Module):
 
 
 def _megablocks_arguments(cfg: DictConfig, device: Optional[str] = None):
-    init_method = partial(torch.nn.init.normal_, mean=0.0, std=cfg.init_std)
+    # TODO(tgale): Add parallelism arguments.
     args = megablocks.layers.arguments.Arguments(
         # Model arguments.
         hidden_size=cfg.d_model,
@@ -231,11 +232,7 @@ def _megablocks_arguments(cfg: DictConfig, device: Optional[str] = None):
         moe_capacity_factor=cfg.moe.get("capacity_factor", 1),
         moe_loss_weight=cfg.moe.loss_weight,
         moe_jitter_eps=cfg.moe.get("jitter_eps", None),
-        # TODO(tgale): Add parallelism arguments.
-        #
         # Initialization arguments.
-        init_method=init_method,
-        output_layer_init_method=init_method,
         device=device or torch.cuda.current_device(),
         # NOTE: Lean on autocast to handle reduced precision.
         fp16=False,
@@ -480,6 +477,16 @@ class MosaicGPT(nn.Module):
                     mean=0.0,
                     std=(self.cfg.init_std / math.sqrt(2 * self.cfg.n_layers)))
 
+        # MoE
+        #
+        # TODO(tgale): Update this for expert model parallelism.
+        if isinstance(module, megablocks.layers.dmoe.dMoE):
+            init_fn(module.router_weight)
+            init_fn(module.w1)
+            module.w2.data.normal_(
+                mean=0.0,
+                std=(self.cfg.init_std / math.sqrt(2 * self.cfg.n_layers)))
+
         # Embedding
         if isinstance(module, nn.Embedding):
             init_fn(module.weight)
@@ -534,6 +541,7 @@ class ComposerMosaicGPT(ComposerModel):
     def __init__(self, cfg):
         super().__init__()
         self.model = MosaicGPT(cfg)
+        self.__param_count = None
         self.__num_fwd_flops = None
         self.train_metrics = {
             'LanguageCrossEntropy': LanguageCrossEntropy(cfg.vocab_size),
@@ -554,14 +562,18 @@ class ComposerMosaicGPT(ComposerModel):
                           key_padding_mask=batch['attention_mask'].bool())
 
     def eval_forward(self, batch, outputs=None):
-        return outputs if outputs is not None else self.forward(batch)
+        out = outputs if outputs is not None else self.forward(batch)
+
+        # Clear the load balancing loss calculation cache since we don't
+        # need it for evaluation.
+        megablocks.layers.moe.clear_load_balancing_loss()
+        return out
 
     def loss(self, outputs, batch):
         targets = self.get_targets(batch)
         loss = F.cross_entropy(outputs.view(-1, outputs.size(-1)),
                                targets.view(-1),
                                ignore_index=-100)
-
 
         if self.model.cfg.get('moe', None):
             load_balancing_loss = (
@@ -580,13 +592,55 @@ class ComposerMosaicGPT(ComposerModel):
         targets = self.get_targets(batch).view(-1)
         metric.update(outputs, targets)
 
+    def _param_count_helper(self):
+        counts = {'dense': 0, 'moe': 0}
+        for p in self.parameters():
+            if self.model.cfg.get('moe', None) and mpu.is_moe_param(p):
+                world_size = mpu.get_expert_parallel_world_size(
+                    _megablocks_arguments(self.model.cfg))
+                num_experts_per_rank = (
+                    self.model.cfg.moe.num_experts // world_size)
+
+                counts['moe'] += (
+                    p.numel() // num_experts_per_rank *
+                    self.model.cfg.moe.num_experts
+                )
+            else:
+                counts['dense'] += p.numel()
+        return counts
+
+    @proprety
+    def param_count(self):
+        if self.__param_count:
+            return self.__param_count
+
+        parameter_counts = self.param_count_helper()
+        self.__param_count = (
+            parameter_counts['dense'] + parameter_counts['moe'])
+        return self.__param_count
+
     @property
     def num_fwd_flops(self):
         if self.__num_fwd_flops:
             return self.__num_fwd_flops
-        n_params = sum(p.numel() for p in self.parameters())
-        # the number of paramters is approximately the number of multiply-accumulates (MAC) in the network
-        # each MAC has 2 FLOPs - we multiply by 2 ie 2 * n_param
+
+        parameter_counts = self._param_count_helper()
+        n_params = parameter_counts['dense']
+        if self.model.cfg.get('moe', None):
+            # MoE layers have `num_experts` times more parameters than a
+            # dense layer of the same size. Divide by the number of experts
+            # so that the #params ~= #flops approximation below stays
+            # accurate. Once we've adjusted the MoE parameter count, scale
+            # by `top_k` to take extra flops from multi-expert token routing
+            # into account.
+            n_params += (
+                parameter_counts['moe'] //
+                self.model.cfg.moe.num_experts *
+                self.model.cfg.moe.top_k
+            )
+
+        # the number of paramters is approximately the number of multiply-accumulates
+        # (MAC) in the network each MAC has 2 FLOPs - we multiply by 2 ie 2 * n_param
         # this gets us FLOPs / token
         params_flops_per_token = 2 * n_params
         params_flops_per_seq = params_flops_per_token * self.model.cfg.max_seq_len

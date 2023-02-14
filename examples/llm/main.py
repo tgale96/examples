@@ -65,6 +65,7 @@ def main(cfg):
     print('Building train loader...')
     train_loader = build_dataloader(cfg.train_loader,
                                     cfg.device_train_batch_size)
+    train_loader.dataset.group_method = 'truncate'
     print('Building eval loader...')
     eval_loader = build_dataloader(cfg.eval_loader, cfg.device_eval_batch_size)
 
