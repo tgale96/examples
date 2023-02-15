@@ -16,6 +16,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from composer.metrics.nlp import LanguageCrossEntropy, Perplexity
 from composer.models.base import ComposerModel
+from composer.utils import dist
+from examples.llm.src import parallelism
 from omegaconf import DictConfig
 import megablocks
 from megablocks.layers import mpu
@@ -220,7 +222,12 @@ class GPTMLP(nn.Module):
 
 
 def _megablocks_arguments(cfg: DictConfig, device: Optional[str] = None):
-    # TODO(tgale): Add parallelism arguments.
+    expert_model_parallelism = cfg.moe.get('expert_model_parallelism', False)
+    expert_parallel_group = (
+        parallelism.create_moe_expert_parallel_group(cfg)
+        if expert_model_parallelism else None
+    )
+
     args = megablocks.layers.arguments.Arguments(
         # Model arguments.
         hidden_size=cfg.d_model,
@@ -229,9 +236,12 @@ def _megablocks_arguments(cfg: DictConfig, device: Optional[str] = None):
         # MoE arguments.
         moe_num_experts=cfg.moe.num_experts,
         moe_top_k=cfg.moe.top_k,
-        moe_capacity_factor=cfg.moe.get("capacity_factor", 1),
+        moe_capacity_factor=cfg.moe.get('capacity_factor', 1),
         moe_loss_weight=cfg.moe.loss_weight,
-        moe_jitter_eps=cfg.moe.get("jitter_eps", None),
+        moe_jitter_eps=cfg.moe.get('jitter_eps', None),
+        # Parallelism arguments.
+        expert_model_parallelism=expert_model_parallelism,
+        expert_parallel_group=expert_parallel_group,
         # Initialization arguments.
         device=device or torch.cuda.current_device(),
         # NOTE: Lean on autocast to handle reduced precision.
@@ -481,7 +491,6 @@ class MosaicGPT(nn.Module):
         #
         # TODO(tgale): Update this for expert model parallelism.
         if isinstance(module, megablocks.layers.dmoe.dMoE):
-            init_fn(module.router_weight)
             init_fn(module.w1)
             module.w2.data.normal_(
                 mean=0.0,
@@ -529,7 +538,21 @@ class MosaicGPT(nn.Module):
 
     # FSDP Wrap function
     def fsdp_wrap_fn(self, module):
-        return isinstance(module, GPTBlock)
+        if not self.cfg.get('moe', None):
+            return isinstance(module, GPTBlock)
+
+        # TODO(tgale): Add support for sharded data parallelism.
+        assert dist.get_world_size() <= self.cfg.moe.num_experts
+
+        # NOTE: Do not wrap expert parameters.
+        fsdp_wrappable = (
+            TorchCausalAttention,
+            FlashCausalAttention,
+            TritonFlashCausalAttention,
+            GPTMLP,
+            megablocks.layers.router.LearnedRouter
+        )
+        return isinstance(module, fsdp_wrappable)
 
     # Activation Checkpointing
     def activation_checkpointing_fn(self, module):
@@ -609,7 +632,7 @@ class ComposerMosaicGPT(ComposerModel):
                 counts['dense'] += p.numel()
         return counts
 
-    @proprety
+    @property
     def param_count(self):
         if self.__param_count:
             return self.__param_count

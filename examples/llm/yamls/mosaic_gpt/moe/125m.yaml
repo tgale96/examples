@@ -21,14 +21,16 @@ model:
   init_std: 0.02
   attn_pdrop: 0.0
   resid_pdrop: 0.0
-  emb_pdrop: 0.0
-  attn_impl: flash
+  emb_pdrop: 0.0  
+  attn_impl: triton
+  alibi: true
 
   # Mixture-of-Experts Layers
   moe:
     num_experts: 64
     top_k: 1
     loss_weight: 0.1
+    expert_model_parallelism: True
 
 
 # Tokenizer

@@ -6,7 +6,7 @@ import sys
 import warnings
 
 from composer import Trainer
-from composer.utils import reproducibility
+from composer.utils import dist, get_device, reproducibility
 from omegaconf import OmegaConf as om
 
 from examples.common.builders import (build_algorithm, build_callback,
@@ -14,6 +14,8 @@ from examples.common.builders import (build_algorithm, build_callback,
                                       build_optimizer, build_scheduler)
 from examples.common.config_utils import log_config, update_batch_size_info
 from examples.llm.src.model_registry import COMPOSER_MODEL_REGISTRY
+from megablocks.layers.moe import MoE
+from megablocks.layers.dmoe import dMoE
 
 
 def build_composer_model(cfg):
@@ -55,6 +57,7 @@ def main(cfg):
     # Build Model
     # For fast initialization of MosaicGPT, use cfg.model.device='meta'
     print('Initializing model...')
+    dist.initialize_dist(get_device(None))
     model = build_composer_model(cfg.model)
     cfg.n_params = sum(p.numel() for p in model.parameters())
     print(f'{cfg.n_params=:.2e}')
