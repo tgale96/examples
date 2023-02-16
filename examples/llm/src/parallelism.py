@@ -37,7 +37,8 @@ def create_moe_expert_parallel_group(cfg: DictConfig):
 
     start_rank = expert_parallel_group_index * expert_parallel_group_size
     end_rank = start_rank + expert_parallel_group_size
-    return torch.distributed.new_group(ranks=range(start_rank, end_rank))
+    ranks = list(range(start_rank, end_rank))
+    return torch.distributed.new_group(ranks=ranks)
 
 
 def create_moe_data_parallel_group(cfg: DictConfig):
@@ -51,7 +52,8 @@ def create_moe_data_parallel_group(cfg: DictConfig):
     data_parallel_group_index = rank % expert_parallel_group_size
 
     # NOTE: Group ranks across the expert parallel groups.
-    return torch.distributed.new_group(ranks=range(
+    ranks = list(range(
         data_parallel_group_index,
         dist.get_world_size(),
         expert_parallel_group_size))
+    return torch.distributed.new_group(ranks=ranks)

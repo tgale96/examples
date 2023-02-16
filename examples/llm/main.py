@@ -16,6 +16,7 @@ from examples.common.config_utils import log_config, update_batch_size_info
 from examples.llm.src.model_registry import COMPOSER_MODEL_REGISTRY
 from megablocks.layers.moe import MoE
 from megablocks.layers.dmoe import dMoE
+import torch
 
 
 def build_composer_model(cfg):
@@ -29,6 +30,7 @@ def build_composer_model(cfg):
 
 
 def main(cfg):
+    dist.initialize_dist(get_device(None))
     reproducibility.seed_all(cfg.seed)
 
     # Run Name
@@ -57,7 +59,6 @@ def main(cfg):
     # Build Model
     # For fast initialization of MosaicGPT, use cfg.model.device='meta'
     print('Initializing model...')
-    dist.initialize_dist(get_device(None))
     model = build_composer_model(cfg.model)
     cfg.n_params = sum(p.numel() for p in model.parameters())
     print(f'{cfg.n_params=:.2e}')

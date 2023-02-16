@@ -251,6 +251,11 @@ def _megablocks_arguments(cfg: DictConfig, device: Optional[str] = None):
     return args
 
 
+def _is_megablocks_mlp(module):
+    return (isinstance(module, megablocks.layers.mlp.MLP) or
+            isinstance(module, megablocks.layers.mlp.SparseMLP))
+
+
 class dMoE(nn.Module):
 
     def __init__(self, cfg: DictConfig, device: Optional[str] = None):
@@ -490,7 +495,8 @@ class MosaicGPT(nn.Module):
         # MoE
         #
         # TODO(tgale): Update this for expert model parallelism.
-        if isinstance(module, megablocks.layers.dmoe.dMoE):
+        if _is_megablocks_mlp(module):
+            # NOTE: Router initialization is handled by the nn.Linear case.
             init_fn(module.w1)
             module.w2.data.normal_(
                 mean=0.0,
@@ -538,21 +544,19 @@ class MosaicGPT(nn.Module):
 
     # FSDP Wrap function
     def fsdp_wrap_fn(self, module):
-        if not self.cfg.get('moe', None):
-            return isinstance(module, GPTBlock)
+        if isinstance(module, GPTBlock):
+            return True
 
-        # TODO(tgale): Add support for sharded data parallelism.
-        assert dist.get_world_size() <= self.cfg.moe.num_experts
-
-        # NOTE: Do not wrap expert parameters.
-        fsdp_wrappable = (
-            TorchCausalAttention,
-            FlashCausalAttention,
-            TritonFlashCausalAttention,
-            GPTMLP,
-            megablocks.layers.router.LearnedRouter
+        # TODO(tgale): Verify that this works and that the above does not take precedence.
+        expert_model_parallelism = (
+            self.cfg.get('moe', None) and
+            self.cfg.moe.get('expert_model_parallelism', False)
         )
-        return isinstance(module, fsdp_wrappable)
+        if expert_model_parallelism and _is_megablocks_mlp(module):
+            moe_data_parallel_group = (
+                parallelism.create_moe_data_parallel_group(self.cfg))
+            return { 'process_group': moe_data_parallel_group }
+        return False
 
     # Activation Checkpointing
     def activation_checkpointing_fn(self, module):

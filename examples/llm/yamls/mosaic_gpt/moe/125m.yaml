@@ -1,5 +1,5 @@
-data_local: &data_local /mount/data/c4
-data_remote: &data_remote s3://mosaicml-datasets/c4/
+data_local: &data_local /mount/data/concat/c4
+data_remote: &data_remote null
 tokenizer_name: &tokenizer_name gpt2
 max_seq_len: &max_seq_len 2048
 global_seed: &global_seed 17
@@ -30,8 +30,7 @@ model:
     num_experts: 64
     top_k: 1
     loss_weight: 0.1
-    expert_model_parallelism: True
-
+    expert_model_parallelism: False
 
 # Tokenizer
 tokenizer:
@@ -46,7 +45,7 @@ train_loader:
   dataset:
     local: *data_local
     remote: *data_remote
-    split: train
+    split: train_small
     shuffle: true
     tokenizer_name: *tokenizer_name
     max_seq_len: *max_seq_len
