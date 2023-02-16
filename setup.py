@@ -9,7 +9,8 @@ from setuptools import find_packages, setup
 
 _PACKAGE_NAME = 'mosaicml-examples'
 _PACKAGE_DIR = 'examples'
-_EXAMPLE_SUBDIRS = ('cifar', 'resnet', 'deeplab', 'bert', 'llm')
+_EXAMPLE_SUBDIRS = ('cifar', 'resnet', 'deeplab', 'bert', 'llm',
+                    'stable_diffusion')
 _REPO_REAL_PATH = os.path.dirname(os.path.realpath(__file__))
 _PACKAGE_REAL_PATH = os.path.join(_REPO_REAL_PATH, _PACKAGE_DIR)
 
@@ -93,7 +94,7 @@ setup(
     version=repo_version,
     author='MosaicML',
     author_email='team@mosaicml.com',
-    description='Optimized starter code for deep learning training + evaulation',
+    description='Optimized starter code for deep learning training + evaluation',
     long_description=long_description,
     long_description_content_type='text/markdown',
     url='https://github.com/mosaicml/examples/',
